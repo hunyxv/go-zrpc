@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 
-	"github.com/example/go-zrpc"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -16,8 +15,8 @@ const (
 )
 
 // Tracing 链路追踪中间件
-func Tracing() zrpc.Middleware {
-	return func(next zrpc.Handler) zrpc.Handler {
+func Tracing() Middleware {
+	return func(next Handler) Handler {
 		return func(ctx context.Context, req interface{}) (interface{}, error) {
 			tracer := otel.GetTracerProvider().Tracer(tracerName)
 			
@@ -49,8 +48,8 @@ func Tracing() zrpc.Middleware {
 }
 
 // TracingWithCarrier 支持跨服务传播的链路追踪中间件
-func TracingWithCarrier(carrier propagation.TextMapCarrier) zrpc.Middleware {
-	return func(next zrpc.Handler) zrpc.Handler {
+func TracingWithCarrier(carrier propagation.TextMapCarrier) Middleware {
+	return func(next Handler) Handler {
 		return func(ctx context.Context, req interface{}) (interface{}, error) {
 			// 从 carrier 中提取 trace context
 			propagator := otel.GetTextMapPropagator()
