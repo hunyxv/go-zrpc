@@ -6,6 +6,14 @@ import (
 	"time"
 )
 
+// LoggerFunc is the custom logger function type
+type LoggerFunc func(format string, args ...any)
+
+// defaultLogger wraps fmt.Printf to match LoggerFunc signature
+func defaultLogger(format string, args ...any) {
+	fmt.Printf(format, args...)
+}
+
 // LoggingConfig holds configuration for logging middleware
 type LoggingConfig struct {
 	// EnableRequestLogging enables logging of request details
@@ -15,7 +23,7 @@ type LoggingConfig struct {
 	// EnableErrorLogging enables logging of errors
 	EnableErrorLogging bool
 	// Logger is the custom logger function
-	Logger func(format string, args ...interface{})
+	Logger LoggerFunc
 }
 
 // DefaultLoggingConfig returns the default logging configuration
@@ -24,7 +32,7 @@ func DefaultLoggingConfig() *LoggingConfig {
 		EnableRequestLogging:  true,
 		EnableResponseLogging: true,
 		EnableErrorLogging:    true,
-		Logger:                fmt.Printf,
+		Logger:                defaultLogger,
 	}
 }
 
@@ -34,7 +42,7 @@ func LoggingMiddlewareWithConfig(config *LoggingConfig) Middleware {
 		config = DefaultLoggingConfig()
 	}
 	if config.Logger == nil {
-		config.Logger = fmt.Printf
+		config.Logger = defaultLogger
 	}
 
 	return func(next Handler) Handler {

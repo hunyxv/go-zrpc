@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"time"
