@@ -192,9 +192,12 @@ func (s *Server) handlePacket(from string, packet *Packet) {
 
 // handleRequest 处理请求
 func (s *Server) handleRequest(from string, packet *Packet) {
+	s.logger.Info("handleRequest", "method", packet.Method, "service", packet.Service)
+	
 	// 查找方法
 	method, ok := s.registry.GetMethod(packet.Method)
 	if !ok {
+		s.logger.Error("method not found", "method", packet.Method)
 		s.sendError(from, packet.ID, ErrMethodNotFound)
 		return
 	}

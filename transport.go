@@ -48,6 +48,7 @@ func NewZMQTransport(identity, endpoint string, isServer bool) (*ZMQTransport, e
 	socket.SetRouterMandatory(1)
 	socket.SetSndtimeo(5 * time.Second)
 	socket.SetRcvtimeo(time.Second)
+	socket.SetLinger(0)
 
 	if isServer {
 		err = socket.Bind(endpoint)
@@ -78,6 +79,8 @@ func (t *ZMQTransport) Send(to string, data []byte) error {
 	if t.closed {
 		return fmt.Errorf("transport closed")
 	}
+
+	fmt.Printf("[ZMQ] Sending %d bytes to '%s'\n", len(data), to)
 
 	// 对于 ROUTER socket，需要发送目标 identity
 	if to != "" {
@@ -113,13 +116,23 @@ func (t *ZMQTransport) Recv() (from string, data []byte, err error) {
 	if err != nil {
 		return "", nil, err
 	}
+	fmt.Printf("[ZMQ] Received %d frames\n", len(frames))
 
-	if len(frames) < 2 {
-		return "", nil, fmt.Errorf("invalid message format")
+	// 对于 ROUTER socket，第一个 frame 是发送者 identity
+	// 对于 DEALER socket，直接是数据
+	socketType, _ := t.socket.GetType()
+	if socketType == zmq.ROUTER {
+		if len(frames) < 2 {
+			return "", nil, fmt.Errorf("invalid message format")
+		}
+		return frames[0], []byte(frames[len(frames)-1]), nil
 	}
 
-	// 第一个 frame 是发送者 identity，最后一个 frame 是数据
-	return frames[0], []byte(frames[len(frames)-1]), nil
+	// DEALER socket
+	if len(frames) < 1 {
+		return "", nil, fmt.Errorf("invalid message format")
+	}
+	return "", []byte(frames[len(frames)-1]), nil
 }
 
 // Close 关闭传输

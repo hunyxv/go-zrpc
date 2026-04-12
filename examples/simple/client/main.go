@@ -19,16 +19,11 @@ type HelloResponse struct {
 	Message string `msgpack:"message"`
 }
 
-// GreeterProxy 代理结构体 - 方法签名必须与服务端一致
-type GreeterProxy struct {
-	SayHello func(ctx context.Context, req *HelloRequest) (*HelloResponse, error)
-}
-
 func main() {
 	log.Println("Connecting to server...")
 	
-	// 创建客户端
-	cli, err := zrpc.NewClient("tcp://localhost:8080")
+	// 创建客户端 - 使用 127.0.0.1
+	cli, err := zrpc.NewClient("tcp://127.0.0.1:8080")
 	if err != nil {
 		log.Fatal("Failed to create client:", err)
 	}
@@ -36,23 +31,15 @@ func main() {
 	
 	log.Println("Client created successfully")
 
-	// 创建代理对象
-	proxy := &GreeterProxy{}
-
-	// 装饰代理 - 将函数字段替换为 RPC 调用
-	log.Println("Decorating proxy...")
-	if err := cli.Decorator("Greeter", proxy, 0); err != nil {
-		log.Fatal("Failed to decorate:", err)
-	}
-	log.Println("Proxy decorated successfully")
-
-	// 调用 RPC
+	// 直接调用 RPC（不使用代理）
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	req := &HelloRequest{Name: "World"}
+	resp := &HelloResponse{}
+
 	log.Println("Calling SayHello...")
-	resp, err := proxy.SayHello(ctx, &HelloRequest{Name: "World"})
-	if err != nil {
+	if err := cli.Call(ctx, "Greeter", "SayHello", req, resp); err != nil {
 		log.Fatal("RPC failed:", err)
 	}
 

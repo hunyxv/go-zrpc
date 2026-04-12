@@ -34,9 +34,9 @@ func (g *GreeterImpl) SayHello(ctx context.Context, req *HelloRequest) (*HelloRe
 }
 
 func main() {
-	// 创建服务端
+	// 创建服务端 - 使用 127.0.0.1
 	srv := zrpc.NewServer(
-		zrpc.WithAddress("tcp://0.0.0.0:8080"),
+		zrpc.WithAddress("tcp://127.0.0.1:8080"),
 	)
 
 	// 注册服务
@@ -44,7 +44,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Println("Server starting on :8080")
+	log.Println("Server starting on 127.0.0.1:8080")
 	if err := srv.Run(); err != nil {
 		log.Fatal(err)
 	}

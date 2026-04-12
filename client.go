@@ -262,11 +262,13 @@ func (c *Client) Call(ctx context.Context, service, method string, req interface
 	}()
 
 	// 发送请求
+	c.logger.Info("sending request", "msgID", msgID, "method", packet.Method)
 	if err := c.transport.Send("", data); err != nil {
 		return err
 	}
 
 	// 等待响应
+	c.logger.Info("waiting for response", "msgID", msgID)
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
