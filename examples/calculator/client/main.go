@@ -31,6 +31,12 @@ type MultiplyResponse struct {
 	Result int `msgpack:"result"`
 }
 
+// CalculatorProxy 代理结构体
+type CalculatorProxy struct {
+	Add      func(ctx context.Context, req *AddRequest) (*AddResponse, error)
+	Multiply func(ctx context.Context, req *MultiplyRequest) (*MultiplyResponse, error)
+}
+
 func main() {
 	// 创建客户端
 	cli, err := zrpc.NewClient("tcp://localhost:8082")
@@ -39,21 +45,27 @@ func main() {
 	}
 	defer cli.Close()
 
+	// 创建代理对象
+	proxy := &CalculatorProxy{}
+
+	// 装饰代理
+	if err := cli.Decorator("Calculator", proxy, 0); err != nil {
+		log.Fatal(err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// 测试加法
-	addReq := &AddRequest{A: 10, B: 20}
-	addResp := &AddResponse{}
-	if err := cli.Call(ctx, "Calculator", "Add", addReq, addResp); err != nil {
+	addResp, err := proxy.Add(ctx, &AddRequest{A: 10, B: 20})
+	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("10 + 20 = %d\n", addResp.Result)
 
 	// 测试乘法
-	mulReq := &MultiplyRequest{A: 6, B: 7}
-	mulResp := &MultiplyResponse{}
-	if err := cli.Call(ctx, "Calculator", "Multiply", mulReq, mulResp); err != nil {
+	mulResp, err := proxy.Multiply(ctx, &MultiplyRequest{A: 6, B: 7})
+	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("6 * 7 = %d\n", mulResp.Result)

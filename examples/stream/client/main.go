@@ -20,6 +20,11 @@ type StreamResponse struct {
 	Message string `msgpack:"message"`
 }
 
+// StreamerProxy 代理结构体
+type StreamerProxy struct {
+	ServerStream func(ctx context.Context, req *StreamRequest, stream zrpc.Stream) error
+}
+
 func main() {
 	// 创建客户端
 	cli, err := zrpc.NewClient("tcp://localhost:8081")
@@ -27,6 +32,14 @@ func main() {
 		log.Fatal(err)
 	}
 	defer cli.Close()
+
+	// 创建代理对象
+	proxy := &StreamerProxy{}
+
+	// 装饰代理
+	if err := cli.Decorator("Streamer", proxy, 0); err != nil {
+		log.Fatal(err)
+	}
 
 	// 流式调用
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

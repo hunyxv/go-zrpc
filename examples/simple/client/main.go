@@ -9,24 +9,14 @@ import (
 	"github.com/example/go-zrpc"
 )
 
-// HelloRequest 请求
-type HelloRequest struct {
-	Name string `msgpack:"name"`
+// Greeter 服务接口
+type Greeter interface {
+	SayHello(ctx context.Context, name string) (string, error)
 }
 
-// HelloResponse 响应
-type HelloResponse struct {
-	Message string `msgpack:"message"`
-}
-
-// GreeterImpl 服务实现
-type GreeterImpl struct{}
-
-// SayHello 实现
-func (g *GreeterImpl) SayHello(ctx context.Context, req *HelloRequest) (*HelloResponse, error) {
-	return &HelloResponse{
-		Message: fmt.Sprintf("Hello, %s!", req.Name),
-	}, nil
+// GreeterProxy 代理结构体
+type GreeterProxy struct {
+	SayHello func(ctx context.Context, name string) (string, error)
 }
 
 func main() {
@@ -37,16 +27,22 @@ func main() {
 	}
 	defer cli.Close()
 
-	// 直接调用 RPC（不使用代理）
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// 创建代理对象
+	proxy := &GreeterProxy{}
 
-	req := &HelloRequest{Name: "World"}
-	resp := &HelloResponse{}
-
-	if err := cli.Call(ctx, "Greeter", "SayHello", req, resp); err != nil {
+	// 装饰代理 - 将函数字段替换为 RPC 调用
+	if err := cli.Decorator("Greeter", proxy, 0); err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println("Response:", resp.Message)
+	// 调用 RPC
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := proxy.SayHello(ctx, "World")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("Response:", resp)
 }

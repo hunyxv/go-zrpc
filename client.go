@@ -358,40 +358,49 @@ func (c *Client) BidiStreamCall(ctx context.Context, service, method string) (Bi
 	return stream, nil
 }
 
-// Proxy 创建代理
-func (c *Client) Proxy(service string, i interface{}) error {
-	return c.decorator(service, i, 0)
+// Proxy 创建代理（使用代理结构体）
+func (c *Client) Proxy(service string, proxy interface{}) error {
+	return c.Decorator(service, proxy, 0)
 }
 
-// ProxyWithRetry 创建带重试的代理
-func (c *Client) ProxyWithRetry(service string, i interface{}, retry int) error {
-	return c.decorator(service, i, retry)
+// ProxyWithRetry 创建带重试的代理（使用代理结构体）
+func (c *Client) ProxyWithRetry(service string, proxy interface{}, retry int) error {
+	return c.Decorator(service, proxy, retry)
 }
 
-// decorator 装饰器实现
-func (c *Client) decorator(service string, i interface{}, retry int) error {
-	v := reflect.ValueOf(i)
+// Decorator 装饰器实现 - 支持代理结构体
+func (c *Client) Decorator(service string, proxy interface{}, retry int) error {
+	v := reflect.ValueOf(proxy)
 	if v.Kind() != reflect.Ptr || v.IsNil() {
-		return fmt.Errorf("invalid interface pointer")
+		return fmt.Errorf("proxy must be a non-nil pointer")
 	}
 
 	v = v.Elem()
 	t := v.Type()
 
-	// 创建代理结构体
-	proxyValue := reflect.New(t)
-
-	// 为每个方法创建代理函数
-	for i := 0; i < t.NumMethod(); i++ {
-		method := t.Method(i)
-		methodName := method.Name
-
-		// 创建代理函数
-		fn := c.createProxyFunc(service, methodName, method.Type, retry)
-		proxyValue.Elem().FieldByName(method.Name).Set(fn)
+	// 确保是结构体
+	if v.Kind() != reflect.Struct {
+		return fmt.Errorf("proxy must point to a struct")
 	}
 
-	v.Set(proxyValue.Elem())
+	// 为每个字段创建代理函数
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Field(i)
+		fieldType := t.Field(i)
+
+		// 只处理函数字段
+		if field.Kind() != reflect.Func {
+			continue
+		}
+
+		methodName := fieldType.Name
+		fnType := field.Type()
+
+		// 创建代理函数
+		proxyFn := c.createProxyFunc(service, methodName, fnType, retry)
+		field.Set(proxyFn)
+	}
+
 	return nil
 }
 
