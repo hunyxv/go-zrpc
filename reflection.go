@@ -164,18 +164,18 @@ func (r *Registry) detectMode(m *Method) FuncMode {
 
 			// 判断是哪种流式
 			if pt.Implements(bidiStreamType) {
-				mode = Stream
+				mode = BidiStreamMode
 			} else if pt.Implements(readerType) {
 				// 客户端流式
 				if mode == ReqStreamRep {
-					mode = Stream
+					mode = BidiStreamMode
 				} else {
 					mode = StreamReqRep
 				}
 			} else if pt.Implements(writeCloserType) {
 				// 服务端流式
 				if mode == StreamReqRep {
-					mode = Stream
+					mode = BidiStreamMode
 				} else {
 					mode = ReqStreamRep
 				}

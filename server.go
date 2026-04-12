@@ -209,7 +209,7 @@ func (s *Server) handleRequest(from string, packet *Packet) {
 		s.handleStreamReqRep(from, packet, method)
 	case ReqStreamRep:
 		s.handleReqStreamRep(from, packet, method)
-	case Stream:
+	case BidiStreamMode:
 		s.handleBidiStream(from, packet, method)
 	}
 }

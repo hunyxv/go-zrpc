@@ -38,8 +38,8 @@ const (
 	StreamReqRep
 	// ReqStreamRep 流式响应模式（服务端流式）
 	ReqStreamRep
-	// Stream 双向流式模式
-	Stream
+	// BidiStreamMode 双向流式模式
+	BidiStreamMode
 )
 
 func (fm FuncMode) String() string {
@@ -50,8 +50,8 @@ func (fm FuncMode) String() string {
 		return "StreamReqRep"
 	case ReqStreamRep:
 		return "ReqStreamRep"
-	case Stream:
-		return "Stream"
+	case BidiStreamMode:
+		return "BidiStream"
 	}
 	return "Unknown"
 }
