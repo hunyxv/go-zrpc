@@ -65,6 +65,8 @@ type Middleware func(next Handler) Handler
 // Stream 流式接口
 type Stream interface {
 	Send(msg interface{}) error
+	Recv(msg interface{}) error
+	Close() error
 }
 
 // BidiStream 双向流式接口

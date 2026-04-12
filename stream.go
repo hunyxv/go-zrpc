@@ -71,6 +71,11 @@ func (s *serverStream) Close() error {
 	return err
 }
 
+// Recv 接收消息 - serverStream 不支持接收，返回错误
+func (s *serverStream) Recv(msg interface{}) error {
+	return io.ErrClosedPipe
+}
+
 // Context 返回上下文
 func (s *serverStream) Context() context.Context {
 	return s.ctx
@@ -156,6 +161,11 @@ func (s *clientStream) Close() error {
 	err = s.transport.Send("", packetData)
 	s.cancel()
 	return err
+}
+
+// Recv 接收消息 - clientStream 不支持接收，返回错误
+func (s *clientStream) Recv(msg interface{}) error {
+	return io.ErrClosedPipe
 }
 
 // Context 返回上下文
