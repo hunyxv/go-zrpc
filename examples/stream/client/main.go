@@ -9,11 +9,6 @@ import (
 	"github.com/example/go-zrpc"
 )
 
-// Streamer 流式服务接口
-type Streamer interface {
-	ServerStream(ctx context.Context, req *StreamRequest) (*StreamResponse, error)
-}
-
 // StreamRequest 流式请求
 type StreamRequest struct {
 	Count int `msgpack:"count"`
