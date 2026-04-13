@@ -20,9 +20,9 @@ type StreamResponse struct {
 	Message string `msgpack:"message"`
 }
 
-// StreamerProxy 代理结构体
+// StreamerProxy 代理结构体 - 使用与服务端一致的签名
 type StreamerProxy struct {
-	ServerStream func(ctx context.Context, req *StreamRequest, stream zrpc.Stream) error
+	ServerStream func(ctx context.Context, req *StreamRequest) (zrpc.Stream, error)
 }
 
 func main() {
@@ -41,11 +41,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// 流式调用
+	// 流式调用 - 使用同名方法调用
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	stream, err := cli.StreamCall(ctx, "Streamer", "ServerStream", &StreamRequest{Count: 10})
+	stream, err := proxy.ServerStream(ctx, &StreamRequest{Count: 10})
 	if err != nil {
 		log.Fatal(err)
 	}

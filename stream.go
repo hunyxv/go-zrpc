@@ -9,13 +9,13 @@ import (
 
 // serverStream 服务端流实现
 type serverStream struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
+	ctx       context.Context
+	cancel    context.CancelFunc
 	transport Transport
-	msgID    string
-	seq      uint64
-	closed   int32
-	mu       sync.Mutex
+	msgID     string
+	seq       uint64
+	closed    int32
+	mu        sync.Mutex
 }
 
 // newServerStream 创建服务端流
@@ -99,7 +99,7 @@ func (w *serverWriteCloser) Close() error {
 	return w.serverStream.Close()
 }
 
-// clientStream 客户端流实现
+// clientStream 客户端流实现（用于 StreamReqRep 模式：客户端发送流）
 type clientStream struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -173,6 +173,52 @@ func (s *clientStream) Context() context.Context {
 	return s.ctx
 }
 
+// clientRecvStream 客户端接收流实现（用于 ReqStreamRep 模式：服务端发送流）
+type clientRecvStream struct {
+	ctx      context.Context
+	recvChan chan *Packet
+	closed   int32
+	codec    Codec
+}
+
+func newClientRecvStream(ctx context.Context, recvChan chan *Packet, codec Codec) *clientRecvStream {
+	return &clientRecvStream{
+		ctx:      ctx,
+		recvChan: recvChan,
+		codec:    codec,
+	}
+}
+
+func (s *clientRecvStream) Send(msg interface{}) error {
+	return io.ErrClosedPipe
+}
+
+func (s *clientRecvStream) Recv(msg interface{}) error {
+	if atomic.LoadInt32(&s.closed) == 1 {
+		return io.EOF
+	}
+
+	select {
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	case packet := <-s.recvChan:
+		if packet == nil || packet.Type == PacketStreamEnd {
+			atomic.StoreInt32(&s.closed, 1)
+			return io.EOF
+		}
+		return s.codec.Unmarshal(packet.Data, msg)
+	}
+}
+
+func (s *clientRecvStream) Close() error {
+	atomic.StoreInt32(&s.closed, 1)
+	return nil
+}
+
+func (s *clientRecvStream) Context() context.Context {
+	return s.ctx
+}
+
 // bidiStream 双向流实现
 type bidiStream struct {
 	ctx       context.Context
@@ -183,10 +229,11 @@ type bidiStream struct {
 	recvChan  chan *Packet
 	closed    int32
 	mu        sync.Mutex
+	codec     Codec
 }
 
 // newBidiStream 创建双向流
-func newBidiStream(ctx context.Context, transport Transport, msgID string, recvChan chan *Packet) *bidiStream {
+func newBidiStream(ctx context.Context, transport Transport, msgID string, recvChan chan *Packet, codec Codec) *bidiStream {
 	ctx, cancel := context.WithCancel(ctx)
 	return &bidiStream{
 		ctx:       ctx,
@@ -194,6 +241,7 @@ func newBidiStream(ctx context.Context, transport Transport, msgID string, recvC
 		transport: transport,
 		msgID:     msgID,
 		recvChan:  recvChan,
+		codec:     codec,
 	}
 }
 
@@ -231,13 +279,11 @@ func (s *bidiStream) Recv(msg interface{}) error {
 	case <-s.ctx.Done():
 		return s.ctx.Err()
 	case packet := <-s.recvChan:
-		if packet == nil {
+		if packet == nil || packet.Type == PacketStreamEnd {
+			atomic.StoreInt32(&s.closed, 1)
 			return io.EOF
 		}
-		if packet.Type == PacketStreamEnd {
-			return io.EOF
-		}
-		return DefaultCodec.Unmarshal(packet.Data, msg)
+		return s.codec.Unmarshal(packet.Data, msg)
 	}
 }
 
@@ -264,7 +310,47 @@ func (s *bidiStream) Context() context.Context {
 	return s.ctx
 }
 
-// streamReader 流式读取器
+// clientStreamReader 客户端流读取器 (用于 ReqStreamRep 模式)
+type clientStreamReader struct {
+	ctx      context.Context
+	recvChan chan *Packet
+	buffer   []byte
+	closed   bool
+	codec    Codec
+}
+
+func (r *clientStreamReader) Read(p []byte) (n int, err error) {
+	if r.closed && len(r.buffer) == 0 {
+		return 0, io.EOF
+	}
+
+	if len(r.buffer) > 0 {
+		n = copy(p, r.buffer)
+		r.buffer = r.buffer[n:]
+		return n, nil
+	}
+
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	case packet := <-r.recvChan:
+		if packet == nil || packet.Type == PacketStreamEnd {
+			r.closed = true
+			return 0, io.EOF
+		}
+		r.buffer = packet.Data
+		n = copy(p, r.buffer)
+		r.buffer = r.buffer[n:]
+		return n, nil
+	}
+}
+
+func (r *clientStreamReader) Close() error {
+	r.closed = true
+	return nil
+}
+
+// streamReader 服务端/内部使用的流式读取器
 type streamReader struct {
 	ctx      context.Context
 	recvChan chan *Packet

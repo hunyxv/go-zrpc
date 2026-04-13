@@ -364,7 +364,7 @@ func (s *Server) handleBidiStream(from string, packet *Packet, method *Method) {
 
 	// 创建双向流
 	recvChan := make(chan *Packet, 10)
-	stream := newBidiStream(ctx, s.transport, packet.ID, recvChan)
+	stream := newBidiStream(ctx, s.transport, packet.ID, recvChan, s.codec)
 
 	// 保存会话
 	session := &streamSession{

@@ -295,6 +295,10 @@ func (c *Client) ProxyWithRetry(service string, proxy interface{}, retry int) er
 }
 
 // Decorator 装饰器实现 - 支持代理结构体，自动识别流式方法
+// 流式模式检测规则（服务端和客户端签名一致）：
+// 1. StreamReqRep（客户端流式）：参数中包含 Stream/BidiStream/io.Reader/io.ReadWriteCloser 类型，返回值中无流式类型
+// 2. ReqStreamRep（服务端流式）：参数中无流式类型，返回值中包含 Stream/BidiStream/io.WriteCloser/io.ReadWriteCloser 类型
+// 3. BidiStream（双向流式）：参数和返回值中都包含流式类型
 func (c *Client) Decorator(service string, proxy interface{}, retry int) error {
 	v := reflect.ValueOf(proxy)
 	if v.Kind() != reflect.Ptr || v.IsNil() {
@@ -323,7 +327,22 @@ func (c *Client) Decorator(service string, proxy interface{}, retry int) error {
 		fnType := field.Type()
 
 		// 检测是否是流式方法
-		mode := c.detectStreamMode(fnType)
+		inMode := c.detectStreamModeInParams(fnType)
+		outMode := c.detectStreamModeInReturns(fnType)
+
+		// 确定最终模式
+		var mode FuncMode = ReqRep
+		switch {
+		case inMode == BidiStreamMode || outMode == BidiStreamMode || (inMode != ReqRep && outMode != ReqRep):
+			mode = BidiStreamMode
+		case inMode == StreamReqRep && outMode == ReqRep:
+			mode = StreamReqRep
+		case inMode == ReqRep && outMode == ReqStreamRep:
+			mode = ReqStreamRep
+		case inMode == StreamReqRep && outMode == ReqStreamRep:
+			// 参数里有流请求，返回值里有流响应，也是双向流
+			mode = BidiStreamMode
+		}
 
 		// 创建代理函数
 		var proxyFn reflect.Value
@@ -343,23 +362,20 @@ func (c *Client) Decorator(service string, proxy interface{}, retry int) error {
 	return nil
 }
 
-// detectStreamMode 检测函数类型的流式模式
-func (c *Client) detectStreamMode(fnType reflect.Type) FuncMode {
+// detectStreamModeInParams 检测参数中的流式模式
+func (c *Client) detectStreamModeInParams(fnType reflect.Type) FuncMode {
 	mode := ReqRep
 	numIn := fnType.NumIn()
 
-	// 检查参数中是否有流式类型
 	for i := 1; i < numIn; i++ {
 		pt := fnType.In(i)
 
-		// 检查是否是 Stream 或 BidiStream
-		if pt.Implements(streamType) || pt.Implements(bidiStreamType) {
-			if pt.Implements(bidiStreamType) {
-				return BidiStreamMode
-			} else if pt.Implements(readerType) {
-				if mode == ReqStreamRep {
-					return BidiStreamMode
-				}
+		if pt.Implements(bidiStreamType) || pt.Implements(reflect.TypeOf((*io.ReadWriteCloser)(nil)).Elem()) {
+			return BidiStreamMode
+		}
+		if pt.Implements(streamType) {
+			// Stream 接口，如果同时实现了 Reader 则是 StreamReqRep
+			if pt.Implements(readerType) {
 				mode = StreamReqRep
 			} else if pt.Implements(writeCloserType) {
 				if mode == StreamReqRep {
@@ -367,6 +383,51 @@ func (c *Client) detectStreamMode(fnType reflect.Type) FuncMode {
 				}
 				mode = ReqStreamRep
 			}
+		}
+		if pt.Implements(readerType) {
+			mode = StreamReqRep
+		}
+		if pt.Implements(writeCloserType) {
+			if mode == StreamReqRep {
+				return BidiStreamMode
+			}
+			mode = ReqStreamRep
+		}
+	}
+
+	return mode
+}
+
+// detectStreamModeInReturns 检测返回值中的流式模式
+func (c *Client) detectStreamModeInReturns(fnType reflect.Type) FuncMode {
+	mode := ReqRep
+	numOut := fnType.NumOut()
+
+	for i := 0; i < numOut-1; i++ { // 跳过最后一个 error
+		rt := fnType.Out(i)
+
+		if rt.Implements(bidiStreamType) || rt.Implements(reflect.TypeOf((*io.ReadWriteCloser)(nil)).Elem()) {
+			return BidiStreamMode
+		}
+		if rt.Implements(streamType) {
+			if rt.Implements(readerType) || rt.Implements(reflect.TypeOf((*io.Reader)(nil)).Elem()) {
+				// 返回值中可读的 stream 表示服务端流式（响应流）
+				mode = ReqStreamRep
+			} else if rt.Implements(writeCloserType) {
+				if mode == ReqStreamRep {
+					return BidiStreamMode
+				}
+				mode = StreamReqRep
+			}
+		}
+		if rt.Implements(readerType) {
+			mode = ReqStreamRep
+		}
+		if rt.Implements(writeCloserType) {
+			if mode == ReqStreamRep {
+				return BidiStreamMode
+			}
+			mode = StreamReqRep
 		}
 	}
 
@@ -420,6 +481,7 @@ func (c *Client) createProxyFunc(service, method string, fnType reflect.Type, re
 }
 
 // createStreamReqRepProxyFunc 创建客户端流式代理函数 (StreamReqRep 模式)
+// 参数中包含 StreamReq 对象，客户端通过它发送流数据
 func (c *Client) createStreamReqRepProxyFunc(service, method string, fnType reflect.Type, retry int) reflect.Value {
 	return reflect.MakeFunc(fnType, func(args []reflect.Value) []reflect.Value {
 		ctx := args[0].Interface().(context.Context)
@@ -430,57 +492,56 @@ func (c *Client) createStreamReqRepProxyFunc(service, method string, fnType refl
 			results[i] = reflect.Zero(fnType.Out(i))
 		}
 
-		msgID := uuid.New().String()
-		stream := newClientStream(ctx, c.transport, msgID)
-
-		session := &clientStreamSession{
-			msgID:    msgID,
-			recvChan: make(chan *Packet, 10),
-			stream:   stream,
-		}
-		c.mu.Lock()
-		c.streams[msgID] = session
-		c.mu.Unlock()
-
-		defer func() {
-			c.mu.Lock()
-			delete(c.streams, msgID)
-			c.mu.Unlock()
-		}()
-
+		// 找到参数中的 stream
 		streamIdx := -1
 		for i := 1; i < len(args); i++ {
 			pt := fnType.In(i)
-			if pt.Implements(writeCloserType) || pt.Implements(reflect.TypeOf((*Stream)(nil)).Elem()) {
+			if pt.Implements(streamType) || pt.Implements(bidiStreamType) || pt.Implements(readerType) {
 				streamIdx = i
 				break
 			}
 		}
 
 		if streamIdx == -1 {
-			results[errIdx] = reflect.ValueOf(fmt.Errorf("no stream parameter found"))
+			results[errIdx] = reflect.ValueOf(fmt.Errorf("no stream request parameter found"))
 			return results
 		}
 
-		args[streamIdx] = reflect.ValueOf(stream)
+		msgID := uuid.New().String()
 
+		// 确定 stream 类型
+		streamTypeIn := fnType.In(streamIdx)
+		var reqStream interface{}
+
+		if streamTypeIn.Implements(readerType) && !streamTypeIn.Implements(streamType) {
+			// 纯 io.Reader，不支持 Send，需要包装
+			results[errIdx] = reflect.ValueOf(fmt.Errorf("io.Reader not supported for stream request, use zrpc.Stream or similar"))
+			return results
+		}
+
+		// 创建客户端发送流
+		clientStreamObj := newClientStream(ctx, c.transport, msgID)
+		reqStream = clientStreamObj
+
+		// 设置 stream 参数
+		args[streamIdx] = reflect.ValueOf(reqStream)
+
+		// 序列化请求（非 stream 参数）
 		var reqData []byte
-		var req interface{}
 		for i := 1; i < len(args); i++ {
 			if i != streamIdx {
-				req = args[i].Interface()
+				req := args[i].Interface()
+				var err error
+				reqData, err = c.codec.Marshal(req)
+				if err != nil {
+					results[errIdx] = reflect.ValueOf(err)
+					return results
+				}
 				break
 			}
 		}
-		if req != nil {
-			var err error
-			reqData, err = c.codec.Marshal(req)
-			if err != nil {
-				results[errIdx] = reflect.ValueOf(err)
-				return results
-			}
-		}
 
+		// 发送请求
 		packet := NewRequestPacket(msgID, service, service+"/"+method, reqData)
 		data, _ := packet.Marshal()
 		if err := c.transport.Send("", data); err != nil {
@@ -488,6 +549,7 @@ func (c *Client) createStreamReqRepProxyFunc(service, method string, fnType refl
 			return results
 		}
 
+		// 等待最终响应
 		future := &callFuture{
 			msgID: msgID,
 			done:  make(chan struct{}),
@@ -495,6 +557,12 @@ func (c *Client) createStreamReqRepProxyFunc(service, method string, fnType refl
 		c.mu.Lock()
 		c.pending[msgID] = future
 		c.mu.Unlock()
+
+		defer func() {
+			c.mu.Lock()
+			delete(c.pending, msgID)
+			c.mu.Unlock()
+		}()
 
 		select {
 		case <-ctx.Done():
@@ -521,6 +589,7 @@ func (c *Client) createStreamReqRepProxyFunc(service, method string, fnType refl
 }
 
 // createReqStreamRepProxyFunc 创建服务端流式代理函数 (ReqStreamRep 模式)
+// 响应中包含 StreamResp 对象，客户端通过它接收流数据
 func (c *Client) createReqStreamRepProxyFunc(service, method string, fnType reflect.Type, retry int) reflect.Value {
 	return reflect.MakeFunc(fnType, func(args []reflect.Value) []reflect.Value {
 		ctx := args[0].Interface().(context.Context)
@@ -532,24 +601,54 @@ func (c *Client) createReqStreamRepProxyFunc(service, method string, fnType refl
 			results[i] = reflect.Zero(fnType.Out(i))
 		}
 
+		// 找到返回值中的 stream 位置
+		streamOutIdx := -1
+		for i := 0; i < errIdx; i++ {
+			rt := fnType.Out(i)
+			if rt.Implements(streamType) || rt.Implements(bidiStreamType) || rt.Implements(readerType) {
+				streamOutIdx = i
+				break
+			}
+		}
+
+		if streamOutIdx == -1 {
+			results[errIdx] = reflect.ValueOf(fmt.Errorf("no stream response return value found"))
+			return results
+		}
+
 		msgID := uuid.New().String()
 
+		// 创建接收通道
 		recvChan := make(chan *Packet, 10)
 		session := &clientStreamSession{
 			msgID:    msgID,
 			recvChan: recvChan,
-			stream:   nil,
 		}
 		c.mu.Lock()
 		c.streams[msgID] = session
 		c.mu.Unlock()
 
-		reader := &clientStreamReader{
-			ctx:      ctx,
-			recvChan: recvChan,
-			codec:    c.codec,
+		// 创建客户端接收流
+		streamTypeOut := fnType.Out(streamOutIdx)
+		var respStream interface{}
+
+		if streamTypeOut.Implements(readerType) && !streamTypeOut.Implements(streamType) {
+			// 返回 io.Reader
+			reader := &clientStreamReader{
+				ctx:      ctx,
+				recvChan: recvChan,
+				codec:    c.codec,
+			}
+			respStream = reader
+		} else {
+			// 返回 zrpc.Stream
+			stream := newClientRecvStream(ctx, recvChan, c.codec)
+			respStream = stream
 		}
 
+		results[streamOutIdx] = reflect.ValueOf(respStream)
+
+		// 序列化请求
 		var reqData []byte
 		if len(args) > 1 {
 			req := args[1].Interface()
@@ -561,6 +660,7 @@ func (c *Client) createReqStreamRepProxyFunc(service, method string, fnType refl
 			}
 		}
 
+		// 发送请求
 		packet := NewRequestPacket(msgID, service, service+"/"+method, reqData)
 		data, _ := packet.Marshal()
 		if err := c.transport.Send("", data); err != nil {
@@ -568,14 +668,13 @@ func (c *Client) createReqStreamRepProxyFunc(service, method string, fnType refl
 			return results
 		}
 
-		results[0] = reflect.ValueOf(reader)
 		results[errIdx] = reflect.Zero(errorType)
-
 		return results
 	})
 }
 
 // createBidiStreamProxyFunc 创建双向流式代理函数 (BidiStreamMode)
+// 参数中有 StreamReq，返回值中有 StreamResp
 func (c *Client) createBidiStreamProxyFunc(service, method string, fnType reflect.Type, retry int) reflect.Value {
 	return reflect.MakeFunc(fnType, func(args []reflect.Value) []reflect.Value {
 		ctx := args[0].Interface().(context.Context)
@@ -587,30 +686,65 @@ func (c *Client) createBidiStreamProxyFunc(service, method string, fnType reflec
 			results[i] = reflect.Zero(fnType.Out(i))
 		}
 
+		// 找到参数中的 stream
+		streamInIdx := -1
+		for i := 1; i < len(args); i++ {
+			pt := fnType.In(i)
+			if pt.Implements(streamType) || pt.Implements(bidiStreamType) || pt.Implements(readerType) {
+				streamInIdx = i
+				break
+			}
+		}
+
+		// 找到返回值中的 stream
+		streamOutIdx := -1
+		for i := 0; i < errIdx; i++ {
+			rt := fnType.Out(i)
+			if rt.Implements(streamType) || rt.Implements(bidiStreamType) || rt.Implements(readerType) {
+				streamOutIdx = i
+				break
+			}
+		}
+
 		msgID := uuid.New().String()
 
+		// 创建接收通道
 		recvChan := make(chan *Packet, 10)
-		stream := newBidiStream(ctx, c.transport, msgID, recvChan)
 		session := &clientStreamSession{
 			msgID:    msgID,
 			recvChan: recvChan,
-			stream:   stream,
 		}
 		c.mu.Lock()
 		c.streams[msgID] = session
 		c.mu.Unlock()
 
+		// 创建双向流（同时支持 Send 和 Recv）
+		bidi := newBidiStream(ctx, c.transport, msgID, recvChan, c.codec)
+
+		// 设置参数和返回值
+		if streamInIdx != -1 {
+			args[streamInIdx] = reflect.ValueOf(bidi)
+		}
+		if streamOutIdx != -1 {
+			results[streamOutIdx] = reflect.ValueOf(bidi)
+		}
+
+		// 序列化请求（非 stream 参数）
 		var reqData []byte
-		if len(args) > 1 {
-			req := args[1].Interface()
-			var err error
-			reqData, err = c.codec.Marshal(req)
-			if err != nil {
-				results[errIdx] = reflect.ValueOf(err)
-				return results
+		for i := 1; i < len(args); i++ {
+			if i != streamInIdx {
+				req := args[i].Interface()
+				var err error
+				reqData, err = c.codec.Marshal(req)
+				if err != nil {
+					results[errIdx] = reflect.ValueOf(err)
+					return results
+				}
+				break
 			}
 		}
 
+		// 发送请求
 		packet := NewRequestPacket(msgID, service, service+"/"+method, reqData)
 		data, _ := packet.Marshal()
 		if err := c.transport.Send("", data); err != nil {
@@ -618,51 +752,9 @@ func (c *Client) createBidiStreamProxyFunc(service, method string, fnType reflec
 			return results
 		}
 
-		results[0] = reflect.ValueOf(stream)
 		results[errIdx] = reflect.Zero(errorType)
-
 		return results
 	})
-}
-
-// clientStreamReader 客户端流读取器 (用于 ReqStreamRep 模式)
-type clientStreamReader struct {
-	ctx      context.Context
-	recvChan chan *Packet
-	buffer   []byte
-	closed   bool
-	codec    Codec
-}
-
-func (r *clientStreamReader) Read(p []byte) (n int, err error) {
-	if r.closed && len(r.buffer) == 0 {
-		return 0, io.EOF
-	}
-
-	if len(r.buffer) > 0 {
-		n = copy(p, r.buffer)
-		r.buffer = r.buffer[n:]
-		return n, nil
-	}
-
-	select {
-	case <-r.ctx.Done():
-		return 0, r.ctx.Err()
-	case packet := <-r.recvChan:
-		if packet == nil || packet.Type == PacketStreamEnd {
-			r.closed = true
-			return 0, io.EOF
-		}
-		r.buffer = packet.Data
-		n = copy(p, r.buffer)
-		r.buffer = r.buffer[n:]
-		return n, nil
-	}
-}
-
-func (r *clientStreamReader) Close() error {
-	r.closed = true
-	return nil
 }
 
 // Close 关闭客户端
