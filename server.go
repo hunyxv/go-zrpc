@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/panjf2000/ants/v2"
 )
 
 // ServerOption 服务端选项
@@ -43,6 +44,15 @@ func WithMiddleware(mw ...Middleware) ServerOption {
 	}
 }
 
+// WithWorkerPoolSize 设置 goroutine pool 大小
+func WithWorkerPoolSize(size int) ServerOption {
+	return func(s *Server) {
+		if s.workerPool != nil {
+			s.workerPool.Tune(size)
+		}
+	}
+}
+
 // Server RPC服务端
 type Server struct {
 	address     string
@@ -58,6 +68,9 @@ type Server struct {
 	wg     sync.WaitGroup
 	mu     sync.RWMutex
 	running bool
+	
+	// goroutine pool
+	workerPool *ants.Pool
 	
 	// 流式会话管理
 	streams map[string]*streamSession
@@ -75,15 +88,19 @@ type streamSession struct {
 func NewServer(opts ...ServerOption) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	
+	// 创建 goroutine pool，默认大小为 10000，可根据需要调整
+	pool, _ := ants.NewPool(10000, ants.WithPreAlloc(false))
+	
 	s := &Server{
-		address:  ":8080",
-		identity: uuid.New().String(),
-		registry: NewRegistry(),
-		codec:    DefaultCodec,
-		logger:   defaultLog,
-		ctx:      ctx,
-		cancel:   cancel,
-		streams:  make(map[string]*streamSession),
+		address:    ":8080",
+		identity:   uuid.New().String(),
+		registry:   NewRegistry(),
+		codec:      DefaultCodec,
+		logger:     defaultLog,
+		ctx:        ctx,
+		cancel:     cancel,
+		workerPool: pool,
+		streams:    make(map[string]*streamSession),
 	}
 
 	for _, opt := range opts {
@@ -156,17 +173,20 @@ func (s *Server) serve() {
 			continue
 		}
 
-		// 处理数据包
-		s.wg.Add(1)
-		go func(from string, packet *Packet) {
-			defer s.wg.Done()
+		// 使用 goroutine pool 处理数据包
+		fromCopy := from
+		packetCopy := packet
+		err = s.workerPool.Submit(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					s.logger.Error("panic recovered", "panic", r, "stack", string(debug.Stack()))
 				}
 			}()
-			s.handlePacket(from, packet)
-		}(from, packet)
+			s.handlePacket(fromCopy, packetCopy)
+		})
+		if err != nil {
+			s.logger.Error("failed to submit task to worker pool", "error", err)
+		}
 	}
 }
 
@@ -283,7 +303,7 @@ func (s *Server) handleStreamReqRep(from string, packet *Packet, method *Method)
 	}
 
 	// 等待流式数据结束
-	go func() {
+	s.workerPool.Submit(func() {
 		defer func() {
 			s.mu.Lock()
 			delete(s.streams, packet.ID)
@@ -301,7 +321,7 @@ func (s *Server) handleStreamReqRep(from string, packet *Packet, method *Method)
 		respPacket := NewResponsePacket(packet.ID, respData)
 		respData, _ = respPacket.Marshal()
 		s.transport.Send(from, respData)
-	}()
+	})
 }
 
 // handleReqStreamRep 处理流式响应
@@ -321,7 +341,7 @@ func (s *Server) handleReqStreamRep(from string, packet *Packet, method *Method)
 	}
 
 	// 执行
-	go func() {
+	s.workerPool.Submit(func() {
 		defer stream.Close()
 
 		resp, err := s.invoke(method, params)
@@ -335,7 +355,7 @@ func (s *Server) handleReqStreamRep(from string, packet *Packet, method *Method)
 		respPacket := NewResponsePacket(packet.ID, respData)
 		respData, _ = respPacket.Marshal()
 		s.transport.Send(from, respData)
-	}()
+	})
 }
 
 // handleBidiStream 处理双向流式
@@ -365,7 +385,7 @@ func (s *Server) handleBidiStream(from string, packet *Packet, method *Method) {
 	}
 
 	// 执行
-	go func() {
+	s.workerPool.Submit(func() {
 		defer func() {
 			s.mu.Lock()
 			delete(s.streams, packet.ID)
@@ -378,7 +398,7 @@ func (s *Server) handleBidiStream(from string, packet *Packet, method *Method) {
 		if err != nil {
 			s.sendError(from, packet.ID, err)
 		}
-	}()
+	})
 }
 
 // handleStreamData 处理流式数据
@@ -487,6 +507,11 @@ func (s *Server) Close() error {
 
 	s.cancel()
 	s.wg.Wait()
+
+	// 释放 goroutine pool
+	if s.workerPool != nil {
+		s.workerPool.Release()
+	}
 
 	if s.transport != nil {
 		return s.transport.Close()

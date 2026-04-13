@@ -4,6 +4,7 @@ go 1.21
 
 require (
 	github.com/google/uuid v1.4.0
+	github.com/panjf2000/ants/v2 v2.10.0
 	github.com/pebbe/zmq4 v1.2.10
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.opentelemetry.io/otel v1.21.0
